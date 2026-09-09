@@ -1,140 +1,176 @@
-# Movies
+# Movie App — Dockerized Deployment
 
-A full-stack movie discovery application. Browse movies, watch trailers, read or add reviews, and create an account or sign in.
+A full-stack movie catalog application — built with **Spring Boot**, **MongoDB**, and **React** — containerized with **Docker** and orchestrated with **Docker Compose**.
 
-The frontend is built with React; the REST API uses Spring Boot and MongoDB.
+Users can browse movies, watch trailers, and leave reviews. The backend exposes a REST API backed by MongoDB; the frontend is a React single-page application served through Nginx, which also acts as a reverse proxy to the backend.
 
-## Features
+This project began as a manual deployment on a bare Linux server (see [Java-Spring-Boot-Application-Deployment-on-Linux](https://github.com/Mariamtahir51/Java-Spring-Boot-Application-Deployment-on-Linux)), using systemd services and a hand-configured Nginx setup. This repository takes that same application and containerizes it, so the entire stack can be built and run consistently on any machine with Docker installed — no manual JRE/MongoDB/Nginx installation required.
 
-- Browse the movie catalogue and open individual movie details.
-- Watch trailers in the app.
-- Read and submit reviews.
-- Register and log in with email/password credentials (passwords are stored as BCrypt hashes).
+## Architecture
 
-## Tech stack
-
-| Area | Technology |
-| --- | --- |
-| Frontend | React 19, React Router, Axios, Bootstrap, Material UI |
-| Backend | Java 26, Spring Boot, Spring Data MongoDB |
-| Database | MongoDB |
-
-## Project structure
-
-```text
-movies/
-├── backend/                 # Spring Boot REST API
-│   ├── src/main/java/       # Controllers, services, and MongoDB models
-│   ├── src/main/resources/  # Application configuration
-│   ├── pom.xml
-│   └── mvnw.cmd
-├── frontend/                # React single-page application
-│   ├── public/
-│   ├── src/
-│   └── package.json
-└── README.md
 ```
+Browser
+   │
+   ▼
+Nginx container (port 80)
+   ├── serves the React production build
+   └── reverse-proxies /api/**  ──▶  Spring Boot container (port 8081)
+                                            │
+                                            ▼
+                                     MongoDB container (port 27017)
+```
+
+Three containers, each with a single responsibility:
+
+| Service    | Base image                       | Responsibility                            |
+|------------|-----------------------------------|--------------------------------------------|
+| `mongo`    | `mongo:8.0` (official)            | Stores movies, users, and reviews          |
+| `backend`  | `eclipse-temurin:21-jre-alpine`   | Spring Boot REST API                       |
+| `frontend` | `nginx:alpine`                    | Serves the React build, proxies API calls  |
+
+Both `backend` and `frontend` use **multi-stage Dockerfiles** — one stage compiles/builds the application, a second, much smaller stage contains only what's needed to *run* it. This keeps the final images small and avoids shipping build tools (Maven, Node.js) into production images.
 
 ## Prerequisites
 
-Install the following before running the project:
+- Docker Engine
+- Docker Compose plugin
+- Git
 
-- Java 26
-- MongoDB running locally
-- Node.js and npm
+## Getting Started
 
-## Run locally
+Clone the repository:
 
-1. Start MongoDB. The backend is configured to use:
+```bash
+git clone https://github.com/Mariamtahir51/Java-Spring-Boot-Application-Deployment-on-Docker-Kubernetes.git
+cd Java-Spring-Boot-Application-Deployment-on-Docker-Kubernetes
+```
 
-   ```text
-   mongodb://localhost:27017/movie-api-db
-   ```
+Build and start the full stack:
 
-2. Start the backend from the project root:
+```bash
+docker compose up --build
+```
 
-   ```powershell
-   cd backend
-   .\mvnw.cmd spring-boot:run
-   ```
+Once all three containers are running, open:
 
-   The API starts at `http://localhost:8081`.
+```
+http://localhost/
+```
 
-3. In a second terminal, install frontend dependencies and start the React app:
+The React app loads from Nginx, and any API calls it makes to `/api/**` are transparently forwarded to the Spring Boot backend — the backend's port is never exposed directly to the browser.
 
-   ```powershell
-   cd frontend
-   npm install
-   npm start
-   ```
+To run everything in the background:
 
-   Open `http://localhost:3000` in your browser.
+```bash
+docker compose up -d
+```
 
-The backend permits requests from the local frontend at `http://localhost:3000`. The frontend API base URL is configured in `frontend/src/api/axiosConfig.js`.
+## Loading Sample Data
 
-## API overview
+MongoDB starts with an empty database. To load sample movie data:
 
-Base URL: `http://localhost:8081/api/v1`
+```bash
+docker cp movies.json mongo:/movies.json
+docker exec -it mongo mongoimport --db movie-api-db --collection movies --file /movies.json --jsonArray
+```
 
-| Method | Endpoint | Description |
-| --- | --- | --- |
-| `GET` | `/movies` | Return all movies. |
-| `GET` | `/movies/{imdbId}` | Return a movie by IMDb ID. |
-| `POST` | `/reviews` | Create a review. |
-| `POST` | `/auth/register` | Create an account. |
-| `POST` | `/auth/login` | Sign in to an existing account. |
+## How the Pieces Connect
 
-### Request examples
+**Backend → MongoDB**
 
-Create a review:
+Inside Docker's internal network, containers reach each other by service name rather than `localhost`. The backend's `application.properties` reflects this:
 
-```json
-{
-  "reviewBody": "A great film.",
-  "imdbId": "tt3915174"
+```properties
+spring.mongodb.uri=mongodb://mongo:27017/movie-api-db
+```
+
+**Frontend → Backend**
+
+The frontend never hardcodes a backend hostname. It calls the API using relative paths:
+
+```javascript
+export default axios.create({
+    headers: { "ngrok-skip-browser-warning": "true" }
+})
+```
+
+A relative request like `/api/v1/movies` resolves against whatever host is currently serving the page. Nginx's configuration (`frontend/nginx.conf`) then proxies any `/api/` request to the backend container:
+
+```nginx
+location /api/ {
+    proxy_pass http://backend:8081/api/;
 }
 ```
 
-Register an account:
+This means the same build works whether it's accessed via `localhost`, a VM's IP address, or a real domain — no rebuild needed for different environments.
 
-```json
-{
-  "username": "moviefan",
-  "email": "moviefan@example.com",
-  "password": "at-least-8-characters"
-}
+## Data Persistence
+
+MongoDB's data is stored in a named Docker volume, so it survives container restarts and rebuilds:
+
+```yaml
+volumes:
+  - mongo-data:/data/db
 ```
 
-Log in:
+Running `docker compose down` stops and removes the containers but keeps this volume intact. To wipe the database entirely, remove the volume explicitly:
 
-```json
-{
-  "email": "moviefan@example.com",
-  "password": "at-least-8-characters"
-}
+```bash
+docker compose down -v
 ```
 
-## Useful commands
+## Known Issue: MongoDB on Kernel 6.19+
 
-```powershell
-# Backend tests
-cd backend
-.\mvnw.cmd test
+MongoDB 8.0's bundled memory allocator (TCMalloc) has a known incompatibility with Linux kernel versions **6.19 through 7.0.13** — see [MongoDB SERVER-121912](https://jira.mongodb.org/browse/SERVER-121912). Since Docker containers share the host's kernel rather than running their own, this affects the containerized `mongo` service exactly as it would a native install.
 
-# Production frontend build
-cd frontend
-npm run build
+The workaround, already applied in `docker-compose.yml`:
 
-# Frontend test runner
-npm test
+```yaml
+mongo:
+  environment:
+    - GLIBC_TUNABLES=glibc.pthread.rseq=1
 ```
 
-## Configuration
+The permanent fix is upgrading the host machine to kernel 7.0.14 or later; this environment variable is a stable interim workaround.
 
-Backend settings are in `backend/src/main/resources/application.properties`:
+## Project Structure
 
-- API port: `8081`
-- MongoDB database: `movie-api-db`
-- MongoDB URI: `mongodb://localhost:27017/movie-api-db`
+```
+.
+├── backend/
+│   ├── Dockerfile
+│   ├── .dockerignore
+│   └── src/...
+├── frontend/
+│   ├── Dockerfile
+│   ├── nginx.conf
+│   ├── .dockerignore
+│   └── src/...
+├── docker-compose.yml
+└── README.md
+```
 
-To use a different database or port, update that file and, if the backend URL changes, update `frontend/src/api/axiosConfig.js` as well.
+## Useful Commands
+
+```bash
+docker compose ps                # view container status
+docker compose logs -f backend   # tail logs for a specific service
+docker compose down              # stop and remove containers (volume persists)
+docker compose up --build -d     # rebuild images and restart after code changes
+```
+
+## Redeploying After Code Changes
+
+```bash
+git pull
+docker compose up --build -d
+```
+
+## Roadmap
+
+- [x] Containerize the backend (multi-stage Dockerfile: Maven build → JRE runtime)
+- [x] Containerize the frontend (multi-stage Dockerfile: Node build → Nginx runtime)
+- [x] Orchestrate all services with Docker Compose
+- [x] Persist MongoDB data with a named volume
+- [ ] Deploy to Kubernetes (Deployments, Services, PersistentVolumeClaim)
+- [ ] Set up a CI/CD pipeline (GitHub Actions) to build and push images automatically on push
